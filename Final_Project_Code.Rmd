@@ -1,0 +1,509 @@
+---
+title: "Quiet Students in Teams: Identifying Their Traits and Predicting Them"
+author: "Jeong-Hin Chin"
+date: "December 16, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(2020)
+library(tidyverse)
+library(boot)
+library(MASS)
+library("FactoMineR")
+library("factoextra")
+library(ggpubr)
+library(VIM)
+library(DescTools)
+library(caret)
+```
+
+# Data
+
+## Data Extraction
+
+Extracts data from file
+
+```{r}
+DATA_RAW = (read.csv("clean_data.csv"))
+```
+
+## Data Cleaning
+
+Fixes the numbers in the "Extraversion" variable as the minimum value should be 1 instead of -1
+
+```{r}
+DATA_RAW <- DATA_RAW %>% mutate(Extraversion = ifelse(Extraversion == -1, 1,Extraversion))
+```
+
+## Data Manipulation
+
+I will manipulate the data by adding three new variables :"ManyTeamExp", "PositiveExp" and "Group_Preference" into the dataset  
+
+```{r}
+DATA_RAW <- DATA_RAW %>% mutate(ManyTeamEXP = ifelse(BT_PastGroups == "ManyTimes",1,0),
+                                PositiveExp = ifelse(BT_PastPositive > 3.5,1,0), 
+                                Group_Preference = ifelse(GroupPreference == "Alone",0,ifelse(GroupPreference == "Partner",1,2)),
+                                isExtraversion = ifelse(Extraversion > 4.5,1,0))
+```
+
+
+Since all ordinal data are transformed into numerical value, I'll remove any remaining variable with strings value.These variables are "BT_Concerns", "GroupPreference", "BT_Orientation", and "BT_PastGroupSetting".
+
+```{r}
+DATA_RAW = DATA_RAW[c(-1,-2,-3,-11)]
+```
+
+Since among the data, there are 6 samples that contain NA values in one or more variables, in order to make computational easy and prevent error from occuring, I'll remove the 6 samples here. The total number of samples collected was 2088, thus 6 is relatively small and can be removed without worrying much. 
+
+Nonetheless, we will still use the original cleaned raw data (DATA_RAW) in some of the basic plotting.
+
+```{r} 
+DATA = DATA_RAW[complete.cases(DATA_RAW),]
+```
+
+I will separate the original data set into smaller data sets so that the computational methods will be easier in the future. The smaller data sets will be containing only "Many Past Team Experiences", "Less Past Team Experiences", "Past Positive Experiences" or "Past Negative Experiences":
+
+```{r}
+ManyExp <- DATA %>% filter(ManyTeamEXP == 1)
+LessExp <- DATA %>% filter(ManyTeamEXP == 0)
+
+PosExp <- DATA %>% filter(PositiveExp == 1)
+NegExp <- DATA %>% filter(PositiveExp == 0)
+```
+
+# Result
+
+## Basic Joint Heat Map
+
+```{r}
+ggplot(DATA,mapping = aes(x = SpeakUp, y =Extraversion)) + geom_density_2d() + 
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", colour="white")
+
+ggplot(DATA,mapping = aes(x = BT_Belongingness, y =Extraversion)) + geom_density_2d() + 
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", colour="white")
+```
+
+## Finding Best Predictors
+
+Setting up variables to find the predictors that have highest correlation with "Extraversion" 
+
+```{r}
+name = DATA%>%names()
+predictors = name[c(-5,-6,-13)]
+n <- nrow(DATA)
+```
+
+Looking at all predictors
+
+```{r}
+pred = c("Extraversion",predictors)
+cor.val = c()
+for(i in 1:11){
+    cor.val[i] = StuartTauC(DATA[[pred[1]]],DATA[[pred[i]]]) %>% abs()
+}
+cor.val = data.frame(cor.val,pred)
+cor.val %>% arrange(desc(cor.val)) %>% head(3)
+```
+
+First best predictor
+
+```{r}
+rss <- map(predictors,~ lm.fit(matrix(c(rep(1, n), DATA[, .x]), ncol = 2), DATA$Extraversion)) %>%map_dbl(~sum(.x$residuals^2)) 
+predictors[which.min(rss)]
+``` 
+
+Second best predictor
+
+```{r}
+p2 <- predictors[-which.min(rss)]
+rss2 <- map(p2,  ~ lm.fit(matrix(c(rep(1, n), DATA[, "SpeakUp"], DATA[,.x]), ncol = 3),           DATA$Extraversion)) %>% map_dbl(~sum(.x$residuals^2))
+p2[which.min(rss2)]
+```
+
+## Bootstrapping
+
+Setting up the variables, mean values and constants for bootstrapping
+
+```{r,cache=TRUE} 
+# Extracting the variables
+speakup = DATA$SpeakUp
+extraversion = DATA$Extraversion
+belongingness = DATA$BT_Belongingness
+
+# Setting up the functions and constants
+B <- 10000
+mean_boot <- function(x, index) { 
+  mean(x[index])
+}
+cor_stat_SE <- function(x, index) {  
+  xstar <- x[index, ]  
+  StuartTauC(xstar$SpeakUp, xstar$Extraversion) # computing correlation of two columns
+}
+cor_stat_BE <- function(x, index) {  
+  xstar <- x[index, ]  
+  StuartTauC(xstar$BT_Belongingness, xstar$Extraversion) # computing correlation of two columns
+}
+extra_mean_diff <- function(x, index) {     
+  xstar <- x[index, ] # boot will handle stratification for us    
+  mean(xstar$Extraversion[xstar$ManyTeamEXP ], na.rm = TRUE) -        
+    mean(xstar$Extraversion[!(xstar$ManyTeamEXP)], na.rm = TRUE)}
+speakup_mean_diff <- function(x, index) {     
+  xstar <- x[index, ] # boot will handle stratification for us    
+  mean(xstar$SpeakUp[xstar$ManyTeamEXP ], na.rm = TRUE) -        
+    mean(xstar$SpeakUp[!(xstar$ManyTeamEXP)], na.rm = TRUE)}
+belong_mean_diff <- function(x, index) {     
+  xstar <- x[index, ] # boot will handle stratification for us    
+  mean(xstar$BT_Belongingness[xstar$ManyTeamEXP ], na.rm = TRUE) -        
+    mean(xstar$BT_Belongingness[!(xstar$ManyTeamEXP)], na.rm = TRUE)}
+badexp_speakup_mean_diff <- function(x, index) {
+  xstar <- x[index, ] # boot will handle stratification for us
+  mean(xstar$SpeakUp[xstar$PositiveExp ], na.rm = TRUE) -
+    mean(xstar$SpeakUp[!(xstar$PositiveExp)], na.rm = TRUE)
+  }
+badexp_extra_mean_diff <- function(x, index) {     
+  xstar <- x[index, ] # boot will handle stratification for us    
+  mean(xstar$Extraversion[xstar$PositiveExp ], na.rm = TRUE) -        
+    mean(xstar$Extraversion[!(xstar$PositiveExp)], na.rm = TRUE)}
+badexp_belong_mean_diff <- function(x, index) {
+  xstar <- x[index, ] # boot will handle stratification for us
+  mean(xstar$BT_Belongingness[xstar$PositiveExp ], na.rm = TRUE) -
+    mean(xstar$BT_Belongingness[!(xstar$PositiveExp)], na.rm = TRUE)
+  }
+```
+
+Doing Bootstrap on "Extraversion" to find the mean, CI, bias and MSE
+
+```{r,cache=TRUE}
+boot_extraversion <- boot(extraversion, statistic = mean_boot, R = B)
+
+## Mean
+boot_extraversion$t0
+## CI
+boot.ci(boot_extraversion, type = "norm")
+## Bias
+mean(boot_extraversion$t - mean(extraversion))
+## MSE
+mean((boot_extraversion$t - mean(extraversion))^2)
+
+# Plotting the graph of the mean of Extraversion
+df_extra <- data.frame(statistic = "mean", x = boot_extraversion$t)
+ggplot(df_extra, aes(x = x, fill = statistic)) + geom_density(alpha = 0.5) +xlab("Extraversion")
+```
+
+Doing Bootstrap on "SpeakUp" to find the mean, CI, bias and MSE
+
+```{r,cache=TRUE}
+boot_speakup <- boot(speakup, statistic = mean_boot, R = B)
+
+## Mean
+boot_speakup$t0
+## CI
+boot.ci(boot_speakup, type = "norm")
+## Bias
+mean(boot_speakup$t - mean(speakup))
+## MSE
+mean((boot_speakup$t - mean(speakup))^2)
+
+# Plotting the graph of the mean of SpeakUp
+df_speakup <- data.frame(statistic = "mean", x = boot_speakup$t)
+ggplot(df_speakup, aes(x = x, fill = statistic)) + geom_density(alpha = 0.5) +xlab("SpeakUp")
+```
+
+Doing Bootstrap on "Belongingness" to find the mean, CI, bias and MSE
+
+```{r,cache=TRUE}
+boot_belongingness <- boot(belongingness, statistic = mean_boot, R = B)
+
+## Mean
+boot_belongingness$t0
+## CI
+boot.ci(boot_belongingness, type = "norm")
+## Bias
+mean(boot_belongingness$t - mean(belongingness))
+## MSE
+mean((boot_belongingness$t - mean(belongingness))^2)
+
+# Plotting the graph of the mean of SpeakUp
+df_belong <- data.frame(statistic = "mean", x = boot_belongingness$t)
+ggplot(df_belong, aes(x = x, fill = statistic)) + geom_density(alpha = 0.5) +xlab("Belongingness")
+```
+
+Doing Bootstrap on "Extraversion" and "SpeakUp" to find the correlation, CI, bias and MSE
+
+```{r,cache=TRUE} 
+boot_SE_cor <- boot(DATA, statistic = cor_stat_SE, R = B)
+
+## Cor
+boot_SE_cor$t0
+## CI
+boot.ci(boot_SE_cor, type = "norm")
+## Bias
+mean(boot_SE_cor$t - boot_SE_cor$t0)
+## MSE
+mean(boot_SE_cor$t - (boot_SE_cor$t0)^2)
+
+## Plotting the graph of the correlation between Extraversion and SpeakUp
+df_secor <- data.frame(statistic = "cor", x = boot_SE_cor$t)
+ggplot(df_secor, aes(x = x, fill = statistic)) + geom_density(alpha = 0.5) + xlab("Correlation Between Extraversion and SpeakUp")
+```
+
+Doing Bootstrap on "Extraversion" and "Belongingness" to find the correlation, CI, bias and MSE
+
+```{r,cache=TRUE} 
+boot_BE_cor <- boot(DATA, statistic = cor_stat_BE, R = B)
+
+## Cor
+boot_BE_cor$t0
+## CI
+boot.ci(boot_BE_cor, type = "norm")
+## Bias
+mean(boot_BE_cor$t - boot_BE_cor$t0)
+## MSE
+mean(boot_BE_cor$t - (boot_BE_cor$t0)^2)
+
+## Plotting the graph of the correlation between Extraversion and SpeakUp
+df_becor <- data.frame(statistic = "cor", x = boot_BE_cor$t)
+ggplot(df_becor, aes(x = x, fill = statistic)) + geom_density(alpha = 0.5) + xlab("Correlation Between Extraversion and Belongingness")
+```
+
+### Many Team Experiences V.S. Less Team Experiences
+
+I am interested to see does students with more previous team experiences have higher extraversion scores
+
+```{r,cache=TRUE}
+extra_boot <- boot(DATA,                  
+                 statistic = extra_mean_diff,                 
+                 strata = DATA$ManyTeamEXP,         
+                 R = B)
+extra_boot$t0
+(ebci <- boot.ci(extra_boot, type = "norm"))
+``` 
+
+I am interested to see does students with more previous team experiences have higher speakup scores
+
+```{r,cache=TRUE} 
+speakup_boot <- boot(DATA,                  
+                 statistic = speakup_mean_diff,                 
+                 strata = DATA$ManyTeamEXP,         
+                 R = B)
+speakup_boot$t0
+(sbci <- boot.ci(speakup_boot, type = "norm"))
+```
+
+I am interested to see does students with more previous team experiences have higher belongingness scores
+
+```{r,cache=TRUE} 
+belong_boot <- boot(DATA,                  
+                 statistic = belong_mean_diff,                 
+                 strata = DATA$ManyTeamEXP,         
+                 R = B)
+belong_boot$t0
+(bbci <- boot.ci(belong_boot, type = "norm"))
+```
+
+### Positive Past Team Experiences V.S. Negative Past Team Experiences
+
+I am interested to see does students with positive team experiences have higher extraversion scores
+
+```{r,cache=TRUE} 
+badexp_extra_boot <- boot(DATA,
+                 statistic = badexp_extra_mean_diff,
+                 strata = DATA$PositiveExp,
+                 R = B)
+badexp_extra_boot$t0
+boot.ci(badexp_extra_boot, type = "norm")
+```
+
+I am interested to see does students with positive team experiences have higher speakup scores
+
+```{r,cache=TRUE}
+badexp_speakup_boot <- boot(DATA,
+                 statistic = badexp_speakup_mean_diff,
+                 strata = DATA$PositiveExp,
+                 R = B)
+badexp_speakup_boot$t0
+boot.ci(badexp_speakup_boot, type = "norm")
+```
+
+I am interested to see does students with positive team experiences have higher belongingness scores
+
+```{r,cache=TRUE}
+badexp_belong_boot <- boot(DATA,
+                 statistic = badexp_belong_mean_diff,
+                 strata = DATA$PositiveExp,
+                 R = B)
+badexp_belong_boot$t0
+boot.ci(badexp_belong_boot, type = "norm")
+```
+
+## LOOCV
+
+Assuming if the survey forms do not have the students evaluating themselves as being extraversion or not, I believe that we can find out a student's "Extraversion" score through "SpeakUp" and "BT_Belongingness". To do that, we will do LOOCV to predict the score of "SpeakUp" and "BT_Belongingness". For simplicity, we define high extraversion as greater than 3.5 and pay a cost of 1 if we misidentify high extraversion as low and vice versa.
+
+```{r, cache=TRUE}
+k <- 10000
+n <- dim(DATA)[1]
+half <- round(n/2)
+
+is_extrav <- function(speak, cutoff)  {
+  speak < cutoff 
+}
+
+candidate_cutoffs <- seq(1, 7, length.out = 100)
+
+mean_loss <- function(truth, prediction) {
+  individual_loss <- 0 + (truth & (!prediction)) * 1 + ((!truth) & prediction) * 1
+  mean(individual_loss)
+}
+
+find_best_cut <- function(speak, truth, do.plot = FALSE) {
+  loss <- map_dbl(candidate_cutoffs, function(cut) {
+    classifications <- is_extrav(speak, cut)
+    return(mean_loss(truth, classifications))
+  })
+  
+  if (do.plot) {
+    plot(candidate_cutoffs,loss, type = 'l', xlab = 'Cutoff', ylab = 'Loss')
+  }
+  
+  return(c(min(loss), candidate_cutoffs[which.min(loss)]))
+}
+
+## Predicting the cost if we predict using SpeakUp
+cvs <- replicate(k, {
+  cv.idx <- sample.int(n)  
+  train <- DATA[cv.idx[1:half], ]
+  test  <- DATA[cv.idx[(half + 1):n], ]
+  
+  loss_cut <- find_best_cut(train$SpeakUp, train$isExtraversion)
+  
+  test_predict <- is_extrav(test$SpeakUp, loss_cut[2])
+  c(mean_loss(test$isExtraversion, test_predict),loss_cut[2] )
+})
+
+## Predicting the cost if we predict using Belongingess
+cvb <- replicate(k, {
+  cv.idx <- sample.int(n)  
+  train <- DATA[cv.idx[1:half], ]
+  test  <- DATA[cv.idx[(half + 1):n], ]
+  
+  loss_cut <- find_best_cut(train$BT_Belongingness, train$isExtraversion)
+  
+  test_predict <- is_extrav(test$BT_Belongingness, loss_cut[2])
+  c(mean_loss(test$isExtraversion, test_predict),loss_cut[2] )
+})
+
+mean(cvs[1]); mean(cvs[2])
+mean(cvb[1]); mean(cvb[2])
+```
+
+## Clustering
+
+I first compute the between point distances
+
+```{r,cache = TRUE}
+dcan <- dist(DATA[, -6], method = "euclidean") 
+hcan <- hclust(dcan)
+```
+
+Then I plot the dendrogram for Hierarchical Clustering
+
+```{r, cache = TRUE}
+par(mar = c(0,0,0,0))
+plot(hcan, axes = FALSE, ann = FALSE, main = NA, labels = FALSE, hang = 0.01)
+```
+
+Pick two clusters, due to its distinctiveness and plotting it out
+
+```{r, cache = TRUE}
+hcan_2 <- cutree(hcan, k = 2)
+df_hcan_2 <- cbind(DATA, cluster = as.character(hcan_2))
+ggplot(df_hcan_2, aes(x = SpeakUp, y = BT_Belongingness, color = cluster, shape = as.factor(isExtraversion))) + geom_jitter(alpha = 0.75, size = 2)
+
+prob2 = function(num){
+  df <- data.frame(y = DATA$isExtraversion == 0, x = hcan_2 == num)
+  mod_clust <- glm(y ~ x, data = df, family = "binomial")
+  out <- list()
+  coef(mod_clust) %>% print()
+  predict(mod_clust, newdata = data.frame(x = TRUE), type = "response") %>% print()
+  predict(mod_clust, newdata = data.frame(x = FALSE), type = "response") %>% print()
+  
+}
+
+for(i in 1:2){prob2(i)}
+```
+
+# Simulation
+
+## Bootstrap mean
+
+```{r, cache = TRUE}
+b <- 10
+normRV10a = rnorm(10)
+normRV1000a = rnorm(1000)
+
+b10.b <- boot(normRV10a, statistic = mean_boot, R = b)
+b10.B <- boot(normRV10a, statistic = mean_boot, R = B)
+b1000.b <- boot(normRV1000a, statistic = mean_boot, R = b)
+b1000.B <- boot(normRV1000a,statistic = mean_boot, R = B)
+
+df_b10.b <- data.frame(statistic = "mean", x = b10.b$t)
+df_b10.B <- data.frame(statistic = "mean", x = b10.B$t)
+df_b1000.b <- data.frame(statistic = "mean", x = b1000.b$t)
+df_b1000.B <- data.frame(statistic = "mean", x = b1000.B$t)
+
+ggplot() + geom_density(data = df_b10.b, mapping = aes(x = x, fill = "n small b small"), alpha = 0.5) + geom_density(data = df_b10.B, mapping = aes(x = x, fill = "n small b large"), alpha = 0.5) + geom_density(data = df_b1000.b, mapping = aes(x = x, fill = "n large b small"), alpha = 0.5) + geom_density(data = df_b1000.B, mapping = aes(x = x, fill = "n large b large"), alpha = 0.5) 
+
+boot.ci(b10.b, type = "norm")
+boot.ci(b10.B, type = "norm")
+boot.ci(b1000.b, type = "norm")
+boot.ci(b1000.B, type = "norm")
+```
+
+## Bootstrap mean difference
+
+```{r, cache = TRUE}
+normRV1000b = rnorm(1000,2)
+normRV1000c = rnorm(1000)
+
+simulA <- data.frame(normRV1000a,normRV1000b)
+simulB <- data.frame(normRV1000a,normRV1000c)
+
+SimulA_mean_diff <- function(x, index) {     
+  xstar <- x[index, ]  
+  mean(xstar$normRV1000a) -  mean(xstar$normRV1000b)}
+SimulB_mean_diff <- function(x, index) {     
+  xstar <- x[index, ]  
+  mean(xstar$normRV1000a) -  mean(xstar$normRV1000c)}
+
+SimulA_boot <- boot(simulA, statistic = SimulA_mean_diff, R = B)
+boot.ci(SimulA_boot, type = "norm")
+
+SimulB_boot <- boot(simulB, statistic = SimulB_mean_diff, R = B)
+boot.ci(SimulB_boot, type = "norm")
+
+ggplot() + geom_density(data = data.frame(statistic = "mean diff", x = SimulA_boot$t), mapping = aes(x = x, fill = "One std normal"), alpha = 0.5)+ geom_density(data = data.frame(statistic = "mean diff", x = SimulB_boot$t), mapping = aes(x = x, fill = "Both std normal"), alpha = 0.5)
+```
+
+## Simulate clustering
+
+```{r,cache = TRUE}
+names(simulA)[1] <- "x"
+names(simulA)[2] <- "y"
+
+names(simulB)[1] <- "x"
+names(simulB)[2] <- "y"
+
+try = rbind(simulA,simulB)
+
+Simuldcan <- dist(try, method = "euclidean") 
+Simulhcan <- hclust(Simuldcan)
+par(mar = c(0,0,0,0))
+plot(Simulhcan, axes = FALSE, ann = FALSE, main = NA, labels = FALSE, hang = 0.01)
+Simulhcan_2 <- cutree(Simulhcan, k = 2)
+df_Simulhcan_2 <- cbind(try, cluster = as.character(Simulhcan_2))
+ggplot(df_Simulhcan_2, aes(x = x, y = y,color = cluster )) +geom_point()
+
+```
